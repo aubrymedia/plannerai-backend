@@ -7,6 +7,7 @@ import companyRoutes from "./routes/company.routes.js";
 import taskRoutes from "./routes/task.routes.js";
 import goalRoutes from "./routes/goal.routes.js";
 import planningRoutes from "./routes/planning.routes.js";
+import planningContextRoutes from "./routes/planningContext.routes.js";
 import { errorHandler, notFound } from "./middlewares/error.middleware.js";
 import env from "./config/env.js";
 
@@ -75,6 +76,7 @@ app.use("/api/companies", companyRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/goals", goalRoutes);
 app.use("/api/planning", planningRoutes);
+app.use("/api/planning-context", planningContextRoutes);
 
 // Error handling
 app.use(notFound);

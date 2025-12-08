@@ -30,6 +30,10 @@ const taskSchema = new mongoose.Schema(
     subtasks: [
       {
         title: String,
+        duration: {
+          type: Number, // Durée en minutes
+          default: 0,
+        },
         completed: {
           type: Boolean,
           default: false,

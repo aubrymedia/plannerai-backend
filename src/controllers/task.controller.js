@@ -3,6 +3,7 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { improveTaskDescription } from "../services/ai/openai.service.js";
 import { scheduleTask, rescheduleRemainingTask, calculateRemainingTime } from "../services/calendar/taskScheduler.service.js";
 import User from "../models/user.model.js";
+import { getCalendarEvents } from "../services/calendar/googleCalendar.service.js";
 
 /**
  * Récupérer toutes les tâches de l'utilisateur
@@ -18,7 +19,12 @@ export const getTasks = asyncHandler(async (req, res) => {
   }
 
   if (companyId) {
-    filter.companyId = companyId;
+    if (companyId === "none") {
+      // Filtrer les tâches sans société (personnelles)
+      filter.companyId = { $in: [null, ""] };
+    } else {
+      filter.companyId = companyId;
+    }
   }
 
   const tasks = await Task.find(filter)
@@ -54,6 +60,122 @@ export const getTask = asyncHandler(async (req, res) => {
   res.json({
     success: true,
     data: task,
+  });
+});
+
+/**
+ * Récupérer la tâche en cours (celle qui a un créneau planifié qui contient l'heure actuelle)
+ * Vérifie aussi les événements du calendrier "Life Planner AI"
+ */
+export const getCurrentTask = asyncHandler(async (req, res) => {
+  const now = new Date();
+  const user = await User.findById(req.user._id);
+
+  // Récupérer toutes les tâches de l'utilisateur avec des créneaux planifiés
+  const tasks = await Task.find({
+    userId: req.user._id,
+    status: { $in: ["todo", "in_progress"] },
+    scheduledSlots: { $exists: true, $ne: [] },
+  })
+    .populate("companyId", "name sector");
+
+  // Trouver la tâche qui a un créneau en cours
+  let currentTask = tasks.find((task) => {
+    if (!task.scheduledSlots || task.scheduledSlots.length === 0) return false;
+
+    return task.scheduledSlots.some((slot) => {
+      const slotStart = new Date(slot.start);
+      const slotEnd = new Date(slot.end);
+      // Vérifier si le créneau n'est pas complété et contient l'heure actuelle
+      return !slot.completed && now >= slotStart && now <= slotEnd;
+    });
+  });
+
+  // Si aucune tâche trouvée, vérifier les événements du calendrier "Life Planner AI"
+  if (!currentTask && user.googleCalendarId) {
+    try {
+      // Récupérer les événements du calendrier "Life Planner AI" pour l'heure actuelle
+      const startOfHour = new Date(now);
+      startOfHour.setMinutes(0, 0, 0);
+      const endOfHour = new Date(now);
+      endOfHour.setMinutes(59, 59, 999);
+
+      const allEvents = await getCalendarEvents(user, startOfHour, endOfHour);
+      
+      // Filtrer les événements du calendrier "Life Planner AI" qui sont en cours
+      const currentEvent = allEvents.find((event) => {
+        if (event.calendarId !== user.googleCalendarId) return false;
+        
+        const eventStart = new Date(event.start.dateTime || event.start.date);
+        const eventEnd = new Date(event.end.dateTime || event.end.date);
+        
+        return now >= eventStart && now <= eventEnd;
+      });
+
+      // Si un événement est trouvé, essayer de trouver la tâche correspondante
+      if (currentEvent) {
+        // Chercher la tâche qui correspond à cet événement via googleEventId
+        const matchingTask = tasks.find((task) =>
+          task.scheduledSlots?.some((slot) => slot.googleEventId === currentEvent.id)
+        );
+
+        if (matchingTask) {
+          currentTask = matchingTask;
+        } else {
+          // Si aucune tâche ne correspond, chercher par titre
+          const taskByTitle = await Task.findOne({
+            userId: req.user._id,
+            title: currentEvent.summary,
+            status: { $in: ["todo", "in_progress"] },
+          }).populate("companyId", "name sector");
+
+          if (taskByTitle) {
+            currentTask = taskByTitle;
+          } else {
+            // Créer une tâche virtuelle à partir de l'événement
+            // On retourne un objet qui ressemble à une tâche mais qui vient du calendrier
+            currentTask = {
+              _id: `event-${currentEvent.id}`,
+              title: currentEvent.summary || "Événement planifié",
+              description: currentEvent.description || "",
+              status: "in_progress",
+              companyId: null,
+              subtasks: [],
+              scheduledSlots: [
+                {
+                  start: currentEvent.start.dateTime || currentEvent.start.date,
+                  end: currentEvent.end.dateTime || currentEvent.end.date,
+                  completed: false,
+                  googleEventId: currentEvent.id,
+                },
+              ],
+              isFromCalendar: true, // Marqueur pour indiquer que c'est un événement du calendrier
+            };
+          }
+        }
+      }
+    } catch (error) {
+      console.error("[getCurrentTask] Erreur lors de la récupération des événements:", error);
+      // Continuer avec le comportement par défaut si l'erreur n'est pas critique
+    }
+  }
+
+  if (!currentTask) {
+    return res.json({
+      success: true,
+      data: null,
+      message: "Aucune tâche en cours",
+    });
+  }
+
+  // Populate les dépendances si nécessaire (seulement pour les vraies tâches)
+  if (!currentTask.isFromCalendar && currentTask.populate) {
+    await currentTask.populate("dependencies", "title status");
+  }
+
+  res.json({
+    success: true,
+    data: currentTask,
   });
 });
 
@@ -100,12 +222,25 @@ export const createTask = asyncHandler(async (req, res) => {
     status,
   } = req.body;
 
+  // Calculer la durée à partir des sous-tâches si fournies
+  let calculatedDuration = duration || 0;
+  if (subtasks && subtasks.length > 0) {
+    calculatedDuration = subtasks.reduce((sum, subtask) => {
+      return sum + (subtask.duration || 0);
+    }, 0);
+  }
+
+  // Si aucune durée n'est fournie et aucune sous-tâche, utiliser 60 minutes par défaut
+  if (calculatedDuration === 0 && (!subtasks || subtasks.length === 0)) {
+    calculatedDuration = 60;
+  }
+
   const task = await Task.create({
     userId: req.user._id,
     title,
     description,
     companyId: companyId || null,
-    duration: duration || 60, // 60 minutes par défaut
+    duration: calculatedDuration,
     deadline: deadline ? new Date(deadline) : null,
     subtasks: subtasks || [],
     dependencies: dependencies || [],
@@ -162,9 +297,18 @@ export const updateTask = asyncHandler(async (req, res) => {
   if (title !== undefined) task.title = title;
   if (description !== undefined) task.description = description;
   if (companyId !== undefined) task.companyId = companyId;
-  if (duration !== undefined) task.duration = duration;
   if (deadline !== undefined) task.deadline = deadline ? new Date(deadline) : null;
-  if (subtasks !== undefined) task.subtasks = subtasks;
+  if (subtasks !== undefined) {
+    task.subtasks = subtasks;
+    // Recalculer la durée à partir des sous-tâches
+    const calculatedDuration = subtasks.reduce((sum, subtask) => {
+      return sum + (subtask.duration || 0);
+    }, 0);
+    task.duration = calculatedDuration;
+  } else if (duration !== undefined) {
+    // Si seulement la durée est fournie (sans sous-tâches), l'utiliser
+    task.duration = duration;
+  }
   if (dependencies !== undefined) task.dependencies = dependencies;
   if (status !== undefined) task.status = status;
   if (scheduledStart !== undefined)
@@ -322,7 +466,22 @@ export const updateSubtask = asyncHandler(async (req, res) => {
   if (title !== undefined) task.subtasks[index].title = title;
   if (completed !== undefined) task.subtasks[index].completed = completed;
 
+  // Calculer automatiquement la progression basée sur les sous-tâches complétées
+  if (task.subtasks && task.subtasks.length > 0) {
+    const completedSubtasks = task.subtasks.filter((st) => st.completed).length;
+    const totalSubtasks = task.subtasks.length;
+    task.progress = Math.round((completedSubtasks / totalSubtasks) * 100);
+
+    // Mettre à jour le statut si nécessaire
+    if (task.progress === 100 && task.status !== "completed") {
+      task.status = "completed";
+    } else if (task.progress > 0 && task.status === "todo") {
+      task.status = "in_progress";
+    }
+  }
+
   await task.save();
+  await task.populate("companyId", "name");
 
   res.json({
     success: true,
@@ -437,19 +596,36 @@ export const scheduleTaskToCalendar = asyncHandler(async (req, res) => {
       task.scheduledSlots = [];
     }
     
-    // Ajouter le nouveau créneau planifié
-    task.scheduledSlots.push({
-      start: result.slot.start,
-      end: result.slot.end,
-      googleEventId: result.event.id,
-      completed: false,
-      timeSpent: 0,
-    });
-    
-    // Mettre à jour les champs de compatibilité (dépréciés)
-    task.googleEventId = result.event.id;
-    task.scheduledStart = result.slot.start;
-    task.scheduledEnd = result.slot.end;
+    // Si la tâche a été splittée en plusieurs créneaux
+    if (result.slots && result.slots.length > 0) {
+      for (const slotData of result.slots) {
+        task.scheduledSlots.push({
+          start: slotData.slot.start,
+          end: slotData.slot.end,
+          googleEventId: slotData.event.id,
+          completed: false,
+          timeSpent: 0,
+        });
+      }
+      // Mettre à jour les champs de compatibilité avec le premier créneau
+      task.googleEventId = result.slots[0].event.id;
+      task.scheduledStart = result.slots[0].slot.start;
+      task.scheduledEnd = result.slots[result.slots.length - 1].slot.end;
+    } else {
+      // Un seul créneau
+      task.scheduledSlots.push({
+        start: result.slot.start,
+        end: result.slot.end,
+        googleEventId: result.event.id,
+        completed: false,
+        timeSpent: 0,
+      });
+      
+      // Mettre à jour les champs de compatibilité (dépréciés)
+      task.googleEventId = result.event.id;
+      task.scheduledStart = result.slot.start;
+      task.scheduledEnd = result.slot.end;
+    }
     
     await task.save();
 
@@ -596,6 +772,214 @@ export const completeScheduledSlot = asyncHandler(async (req, res) => {
   res.json({
     success: true,
     data: task,
+  });
+});
+
+/**
+ * Synchronise les créneaux planifiés d'une tâche avec Google Calendar
+ */
+export const syncTaskSlots = asyncHandler(async (req, res) => {
+  const task = await Task.findOne({
+    _id: req.params.id,
+    userId: req.user._id,
+  });
+
+  if (!task) {
+    return res.status(404).json({
+      success: false,
+      error: "Tâche non trouvée",
+    });
+  }
+
+  const user = await User.findById(req.user._id);
+  if (!user || !user.googleCalendarId) {
+    return res.status(400).json({
+      success: false,
+      error: "Calendrier Google non configuré",
+    });
+  }
+
+  if (!task.scheduledSlots || task.scheduledSlots.length === 0) {
+    return res.json({
+      success: true,
+      data: task,
+      message: "Aucun créneau à synchroniser",
+    });
+  }
+
+  // Récupérer les événements depuis Google Calendar
+  const { getCalendarEvents } = await import("../services/calendar/googleCalendar.service.js");
+  
+  // Déterminer la période de recherche (de maintenant à 30 jours dans le futur)
+  const now = new Date();
+  const searchEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  
+  const allEvents = await getCalendarEvents(user, now, searchEnd);
+  
+  // Filtrer les événements du calendrier "Life Planner AI"
+  const lifePlannerEvents = allEvents.filter(
+    (event) => event.calendarId === user.googleCalendarId
+  );
+
+  // Créer un Map des événements par ID
+  const eventsMap = new Map();
+  lifePlannerEvents.forEach((event) => {
+    eventsMap.set(event.id, event);
+  });
+
+  // Synchroniser les créneaux avec les événements réels
+  let hasChanges = false;
+  for (let i = 0; i < task.scheduledSlots.length; i++) {
+    const slot = task.scheduledSlots[i];
+    if (slot.googleEventId) {
+      const calendarEvent = eventsMap.get(slot.googleEventId);
+      
+      if (calendarEvent) {
+        // Mettre à jour les dates depuis Google Calendar
+        const eventStart = new Date(calendarEvent.start.dateTime || calendarEvent.start.date);
+        const eventEnd = new Date(calendarEvent.end.dateTime || calendarEvent.end.date);
+        
+        // Vérifier si les dates ont changé
+        const slotStart = new Date(slot.start);
+        const slotEnd = new Date(slot.end);
+        
+        if (
+          eventStart.getTime() !== slotStart.getTime() ||
+          eventEnd.getTime() !== slotEnd.getTime()
+        ) {
+          slot.start = eventStart;
+          slot.end = eventEnd;
+          hasChanges = true;
+        }
+      } else {
+        // L'événement n'existe plus dans Google Calendar, le marquer comme supprimé
+        // On pourrait le supprimer ou le garder avec un flag
+        console.log(`[SYNC] Événement ${slot.googleEventId} non trouvé dans Google Calendar`);
+      }
+    }
+  }
+
+  if (hasChanges) {
+    await task.save();
+  }
+
+  await task.populate("companyId", "name");
+
+  res.json({
+    success: true,
+    data: task,
+    hasChanges,
+  });
+});
+
+/**
+ * Replanifier complètement une tâche (supprime les anciens créneaux et replanifie)
+ */
+export const rescheduleTask = asyncHandler(async (req, res) => {
+  const task = await Task.findOne({
+    _id: req.params.id,
+    userId: req.user._id,
+  });
+
+  if (!task) {
+    return res.status(404).json({
+      success: false,
+      error: "Tâche non trouvée",
+    });
+  }
+
+  const userId = req.user._id;
+  const user = await User.findById(userId);
+
+  if (!user || !user.googleCalendarId) {
+    return res.status(400).json({
+      success: false,
+      error: "Calendrier Google non configuré",
+    });
+  }
+
+  // Supprimer les anciens événements Google Calendar
+  const { deleteCalendarEvent } = await import("../services/calendar/googleCalendar.service.js");
+  
+  if (task.scheduledSlots && task.scheduledSlots.length > 0) {
+    for (const slot of task.scheduledSlots) {
+      if (slot.googleEventId) {
+        try {
+          await deleteCalendarEvent(user, slot.googleEventId);
+        } catch (error) {
+          console.error(`[RESCHEDULE] Erreur lors de la suppression de l'événement ${slot.googleEventId}:`, error);
+          // Continuer même si la suppression échoue
+        }
+      }
+    }
+  }
+
+  // Réinitialiser les créneaux planifiés
+  task.scheduledSlots = [];
+  task.googleEventId = null;
+  task.scheduledStart = null;
+  task.scheduledEnd = null;
+  await task.save();
+
+  // Replanifier la tâche complète
+  const { scheduleTask } = await import("../services/calendar/taskScheduler.service.js");
+  const result = await scheduleTask(user, task);
+
+  if (!result.success) {
+    return res.status(400).json({
+      success: false,
+      error: result.reason,
+      alternatives: result.alternatives || [],
+    });
+  }
+
+  // Ajouter le nouveau créneau (ou les créneaux si split)
+  if (!task.scheduledSlots) {
+    task.scheduledSlots = [];
+  }
+
+  // Si la tâche a été splittée en plusieurs créneaux
+  if (result.slots && result.slots.length > 0) {
+    for (const slotData of result.slots) {
+      task.scheduledSlots.push({
+        start: slotData.slot.start,
+        end: slotData.slot.end,
+        googleEventId: slotData.event.id,
+        completed: false,
+        timeSpent: 0,
+      });
+    }
+    // Mettre à jour les champs de compatibilité avec le premier créneau
+    task.googleEventId = result.slots[0].event.id;
+    task.scheduledStart = result.slots[0].slot.start;
+    task.scheduledEnd = result.slots[result.slots.length - 1].slot.end;
+  } else {
+    // Un seul créneau
+    task.scheduledSlots.push({
+      start: result.slot.start,
+      end: result.slot.end,
+      googleEventId: result.event.id,
+      completed: false,
+      timeSpent: 0,
+    });
+
+    // Mettre à jour les champs de compatibilité
+    task.googleEventId = result.event.id;
+    task.scheduledStart = result.slot.start;
+    task.scheduledEnd = result.slot.end;
+  }
+
+  await task.save();
+  await task.populate("companyId", "name");
+
+  res.json({
+    success: true,
+    data: {
+      task,
+      event: result.event,
+      slot: result.slot,
+      alternatives: result.alternatives || [],
+    },
   });
 });
 

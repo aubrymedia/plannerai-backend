@@ -8,6 +8,31 @@ const planningContextSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
+    // Informations personnelles
+    personalInfo: {
+      firstName: {
+        type: String,
+      },
+      lastName: {
+        type: String,
+      },
+      dateOfBirth: {
+        type: Date,
+      },
+      gender: {
+        type: String,
+        enum: ["male", "female", ""],
+        default: "",
+      },
+      weight: {
+        type: Number, // en kg
+        min: 0,
+      },
+      height: {
+        type: Number, // en cm
+        min: 0,
+      },
+    },
     // Finances personnelles
     personalTreasury: {
       type: Number,
@@ -22,46 +47,64 @@ const planningContextSchema = new mongoose.Schema(
       enum: ["low", "medium", "high"],
       default: "medium",
     },
-    // Préférences horaires
+    // Préférences horaires par type d'activité
     preferredHours: {
-      morning: {
+      sleep: {
         start: {
           type: String, // Format "HH:mm"
-          default: "09:00",
         },
         end: {
           type: String,
-          default: "12:00",
         },
-        enabled: {
-          type: Boolean,
-          default: true,
+        flexible: {
+          type: Boolean, // "Peu importe"
+          default: false,
         },
       },
-      afternoon: {
+      sport: {
         start: {
           type: String,
-          default: "14:00",
         },
         end: {
           type: String,
-          default: "18:00",
         },
-        enabled: {
+        flexible: {
           type: Boolean,
-          default: true,
+          default: false,
         },
       },
-      evening: {
+      work: {
         start: {
           type: String,
-          default: "19:00",
         },
         end: {
           type: String,
-          default: "22:00",
         },
-        enabled: {
+        flexible: {
+          type: Boolean,
+          default: false,
+        },
+      },
+      social: {
+        start: {
+          type: String,
+        },
+        end: {
+          type: String,
+        },
+        flexible: {
+          type: Boolean,
+          default: false,
+        },
+      },
+      meals: {
+        start: {
+          type: String,
+        },
+        end: {
+          type: String,
+        },
+        flexible: {
           type: Boolean,
           default: false,
         },

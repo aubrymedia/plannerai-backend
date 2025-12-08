@@ -30,7 +30,7 @@ const userSchema = new mongoose.Schema(
       type: Date,
     },
     googleCalendarId: {
-      type: String, // ID du calendrier "Life Planner IA" créé
+      type: String, // ID du calendrier "Life Planner AI" créé
     },
     selectedCalendarIds: {
       type: [String], // IDs des calendriers Google sélectionnés pour la planification

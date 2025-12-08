@@ -109,6 +109,7 @@ export const buildPlanningContext = async (userId, startDate, endDate) => {
 
       // Contexte personnel
       personal: {
+        personalInfo: planningContext?.personalInfo || {},
         preferredHours: planningContext?.preferredHours || {},
         constraints: planningContext?.constraints || {},
         aiNotes: planningContext?.aiNotes || "",

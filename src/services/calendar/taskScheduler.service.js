@@ -2,6 +2,33 @@ import { getCalendarEvents, createCalendarEvent } from "./googleCalendar.service
 import { getFreeSlots } from "./googleCalendar.service.js";
 
 /**
+ * Arrondit une date à l'heure ronde la plus proche (00, 15, 30, 45 minutes)
+ */
+const roundToQuarterHour = (date) => {
+  const rounded = new Date(date);
+  const minutes = rounded.getMinutes();
+  const roundedMinutes = Math.round(minutes / 15) * 15;
+  rounded.setMinutes(roundedMinutes, 0, 0);
+  return rounded;
+};
+
+/**
+ * Arrondit une date à l'heure ronde supérieure (00, 15, 30, 45 minutes)
+ */
+const roundUpToQuarterHour = (date) => {
+  const rounded = new Date(date);
+  const minutes = rounded.getMinutes();
+  const remainder = minutes % 15;
+  if (remainder === 0) {
+    rounded.setSeconds(0, 0);
+    return rounded;
+  }
+  const roundedMinutes = minutes + (15 - remainder);
+  rounded.setMinutes(roundedMinutes, 0, 0);
+  return rounded;
+};
+
+/**
  * Trouve le meilleur créneau libre pour une tâche
  */
 export const findBestSlotForTask = async (user, task, preferredDate = null) => {
@@ -67,10 +94,23 @@ export const findBestSlotForTask = async (user, task, preferredDate = null) => {
       periodDurationDays: (searchEnd - searchStart) / (1000 * 60 * 60 * 24),
     });
 
+    // Récupérer les événements existants pour trouver les fins d'événements
+    const existingEvents = await getCalendarEvents(user, searchStart, searchEnd);
+    
+    // Extraire les fins d'événements (prioriser les créneaux qui commencent juste après)
+    const eventEnds = existingEvents
+      .map((event) => {
+        const end = new Date(event.end.dateTime || event.end.date);
+        return roundUpToQuarterHour(end);
+      })
+      .filter((end) => end >= searchStart && end <= searchEnd)
+      .sort((a, b) => a.getTime() - b.getTime());
+
     // Récupérer les créneaux libres
     const freeSlots = await getFreeSlots(user, searchStart, searchEnd, {});
     
     console.log("[Task Scheduler] Créneaux libres trouvés:", freeSlots.length);
+    console.log("[Task Scheduler] Fins d'événements trouvées:", eventEnds.length);
 
     // Filtrer les créneaux qui ont la durée nécessaire
     const taskDuration = task.duration || 60; // Durée en minutes
@@ -92,6 +132,23 @@ export const findBestSlotForTask = async (user, task, preferredDate = null) => {
     // Trouver des créneaux consécutifs qui peuvent être combinés
     const suitableSlots = [];
     
+    // Fonction pour créer un créneau arrondi
+    const createRoundedSlot = (start, end, priority = 0) => {
+      const roundedStart = roundUpToQuarterHour(start);
+      const roundedEnd = new Date(roundedStart.getTime() + requiredDuration);
+      
+      // Vérifier que le créneau arrondi est toujours dans le créneau libre
+      if (roundedStart >= start && roundedEnd <= end) {
+        return {
+          start: roundedStart,
+          end: roundedEnd,
+          priority: priority, // Priorité plus élevée = meilleur
+          combined: false,
+        };
+      }
+      return null;
+    };
+    
     for (let i = 0; i < freeSlots.length; i++) {
       const startSlot = freeSlots[i];
       let currentEnd = startSlot.end;
@@ -108,11 +165,10 @@ export const findBestSlotForTask = async (user, task, preferredDate = null) => {
           
           // Si on a assez de temps, on peut utiliser ce créneau combiné
           if (currentEnd.getTime() - startSlot.start.getTime() >= requiredDuration) {
-            suitableSlots.push({
-              start: startSlot.start,
-              end: new Date(startSlot.start.getTime() + requiredDuration),
-              combined: true,
-            });
+            const roundedSlot = createRoundedSlot(startSlot.start, currentEnd, 1);
+            if (roundedSlot) {
+              suitableSlots.push(roundedSlot);
+            }
             break;
           }
         } else {
@@ -124,9 +180,29 @@ export const findBestSlotForTask = async (user, task, preferredDate = null) => {
       // Vérifier aussi les créneaux individuels qui sont assez longs
       const slotDuration = startSlot.end.getTime() - startSlot.start.getTime();
       if (slotDuration >= requiredDuration) {
+        const roundedSlot = createRoundedSlot(startSlot.start, startSlot.end, 1);
+        if (roundedSlot) {
+          suitableSlots.push(roundedSlot);
+        }
+      }
+    }
+    
+    // Ajouter des créneaux qui commencent juste après les fins d'événements
+    for (const eventEnd of eventEnds) {
+      // Vérifier si on peut planifier à partir de cette fin d'événement
+      const slotStart = eventEnd;
+      const slotEnd = new Date(slotStart.getTime() + requiredDuration);
+      
+      // Vérifier que ce créneau est dans un créneau libre
+      const isInFreeSlot = freeSlots.some((freeSlot) => {
+        return slotStart >= freeSlot.start && slotEnd <= freeSlot.end;
+      });
+      
+      if (isInFreeSlot && slotEnd <= searchEnd) {
         suitableSlots.push({
-          start: startSlot.start,
-          end: new Date(startSlot.start.getTime() + requiredDuration),
+          start: slotStart,
+          end: slotEnd,
+          priority: 10, // Priorité très élevée pour les créneaux qui suivent un événement
           combined: false,
         });
       }
@@ -190,10 +266,26 @@ export const findBestSlotForTask = async (user, task, preferredDate = null) => {
     }
 
     // Prioriser les créneaux :
-    // 1. Le plus proche de la date préférée (si fournie)
-    // 2. Le plus proche de maintenant
-    // 3. Le plus proche de la deadline (si existe)
+    // 1. Priorité (créneaux qui suivent un événement = priorité 10)
+    // 2. Heures rondes (00, 15, 30, 45)
+    // 3. Le plus proche de la date préférée (si fournie)
+    // 4. Le plus proche de maintenant
+    // 5. Le plus proche de la deadline (si existe)
     uniqueSlots.sort((a, b) => {
+      // Priorité (plus élevée = meilleur)
+      const aPriority = a.priority || 0;
+      const bPriority = b.priority || 0;
+      if (aPriority !== bPriority) return bPriority - aPriority;
+      
+      // Vérifier si l'heure est ronde (00, 15, 30, 45)
+      const aMinutes = a.start.getMinutes();
+      const bMinutes = b.start.getMinutes();
+      const aIsRound = aMinutes === 0 || aMinutes === 15 || aMinutes === 30 || aMinutes === 45;
+      const bIsRound = bMinutes === 0 || bMinutes === 15 || bMinutes === 30 || bMinutes === 45;
+      
+      if (aIsRound && !bIsRound) return -1;
+      if (!aIsRound && bIsRound) return 1;
+      
       const aStart = a.start.getTime();
       const bStart = b.start.getTime();
       const nowTime = now.getTime();
@@ -267,8 +359,9 @@ export const calculateRemainingTime = (task) => {
 
 /**
  * Planifie une tâche dans Google Calendar (première planification ou replanification)
+ * Peut splitter la tâche en plusieurs événements si nécessaire
  */
-export const scheduleTask = async (user, task, preferredDate = null, remainingDuration = null) => {
+export const scheduleTask = async (user, task, preferredDate = null, remainingDuration = null, allowSplitting = true) => {
   console.log("[SCHEDULE TASK] Fonction appelée avec:", {
     taskTitle: task.title,
     taskDuration: task.duration,
@@ -276,6 +369,7 @@ export const scheduleTask = async (user, task, preferredDate = null, remainingDu
     scheduledSlots: task.scheduledSlots?.length || 0,
     preferredDate: preferredDate,
     remainingDuration: remainingDuration,
+    allowSplitting: allowSplitting,
   });
   
   try {
@@ -315,37 +409,39 @@ export const scheduleTask = async (user, task, preferredDate = null, remainingDu
       duration: durationToSchedule,
     };
 
-    // Trouver un créneau
+    // Essayer de trouver un créneau unique d'abord
     console.log("[SCHEDULE TASK] Recherche du meilleur créneau pour", durationToSchedule, "minutes...");
     const slotResult = await findBestSlotForTask(user, tempTask, preferredDate);
-    console.log("[SCHEDULE TASK] Résultat de findBestSlotForTask:", {
-      success: slotResult.success,
-      reason: slotResult.reason,
-      hasSlot: !!slotResult.slot,
-    });
+    
+    if (slotResult.success) {
+      console.log("[SCHEDULE TASK] Créneau unique trouvé, création de l'événement...");
+      // Créer l'événement dans Google Calendar
+      const event = await createCalendarEvent(user, {
+        title: `${task.title}${task.scheduledSlots?.length > 0 ? ` (suite)` : ""}`,
+        description: task.description || "",
+        start: slotResult.slot.start,
+        end: slotResult.slot.end,
+      });
 
-    if (!slotResult.success) {
-      console.log("[SCHEDULE TASK] ÉCHEC: Impossible de trouver un créneau");
-      return slotResult;
+      console.log("[SCHEDULE TASK] SUCCÈS: Événement créé avec ID:", event.id);
+      return {
+        success: true,
+        event,
+        slot: slotResult.slot,
+        alternatives: slotResult.alternatives,
+        durationScheduled: durationToSchedule,
+        slots: [{ event, slot: slotResult.slot }],
+      };
     }
 
-    console.log("[SCHEDULE TASK] Créneau trouvé, création de l'événement...");
-    // Créer l'événement dans Google Calendar
-    const event = await createCalendarEvent(user, {
-      title: `${task.title}${task.scheduledSlots?.length > 0 ? ` (suite)` : ""}`,
-      description: task.description || "",
-      start: slotResult.slot.start,
-      end: slotResult.slot.end,
-    });
+    // Si aucun créneau unique n'est trouvé et que le split est autorisé, essayer de splitter
+    if (allowSplitting && durationToSchedule > 60) { // Seulement si la tâche fait plus d'1h
+      console.log("[SCHEDULE TASK] Aucun créneau unique trouvé, tentative de split...");
+      return await scheduleTaskSplit(user, task, durationToSchedule, preferredDate);
+    }
 
-    console.log("[SCHEDULE TASK] SUCCÈS: Événement créé avec ID:", event.id);
-    return {
-      success: true,
-      event,
-      slot: slotResult.slot,
-      alternatives: slotResult.alternatives,
-      durationScheduled: durationToSchedule,
-    };
+    console.log("[SCHEDULE TASK] ÉCHEC: Impossible de trouver un créneau");
+    return slotResult;
   } catch (error) {
     console.error("[SCHEDULE TASK] ERREUR:", error);
     console.error("[SCHEDULE TASK] Stack:", error.stack);
@@ -354,6 +450,249 @@ export const scheduleTask = async (user, task, preferredDate = null, remainingDu
       reason: "Erreur lors de la planification : " + error.message,
     };
   }
+};
+
+/**
+ * Planifie une tâche en la splittant en plusieurs événements
+ * Utilise les durées des sous-tâches si disponibles pour un split plus logique
+ */
+const scheduleTaskSplit = async (user, task, totalDuration, preferredDate = null) => {
+  console.log("[SCHEDULE TASK SPLIT] Tentative de split pour", totalDuration, "minutes");
+  
+  const now = new Date();
+  const deadline = task.deadline ? new Date(task.deadline) : null;
+  
+  // Déterminer la période de recherche
+  let searchStart = preferredDate ? new Date(preferredDate) : new Date(now.getTime() + 30 * 60 * 1000);
+  let searchEnd;
+  if (deadline) {
+    const deadlineEndOfDay = new Date(deadline);
+    deadlineEndOfDay.setHours(23, 59, 59, 999);
+    searchEnd = deadlineEndOfDay;
+    const maxSearchEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    searchEnd = new Date(Math.min(searchEnd.getTime(), maxSearchEnd.getTime()));
+  } else {
+    searchEnd = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+  }
+
+  // Récupérer les créneaux libres
+  const freeSlots = await getFreeSlots(user, searchStart, searchEnd, {});
+  freeSlots.sort((a, b) => a.start.getTime() - b.start.getTime());
+
+  // D'ABORD essayer les stratégies classiques de split (qui privilégient les gros blocs)
+  // Stratégies de split : essayer différentes tailles de blocs
+  // On commence par essayer de garder la tâche en un seul bloc si possible
+  const splitStrategies = [
+    { minBlockSize: totalDuration, maxBlocks: 1 }, // D'abord essayer de garder la tâche complète en un seul bloc
+    { minBlockSize: Math.max(120, Math.floor(totalDuration / 2)), maxBlocks: 5 }, // Blocs de 2h minimum, max 5 blocs
+    { minBlockSize: Math.max(60, Math.floor(totalDuration / 3)), maxBlocks: 5 }, // Blocs de 1h minimum, max 5 blocs
+    { minBlockSize: Math.max(30, Math.floor(totalDuration / 5)), maxBlocks: 10 }, // Blocs de 30min minimum, max 10 blocs
+  ];
+
+  for (const strategy of splitStrategies) {
+    console.log("[SCHEDULE TASK SPLIT] Essai stratégie:", strategy);
+    const slots = [];
+    let remainingDuration = totalDuration;
+    let lastSlotEnd = null;
+
+    for (const freeSlot of freeSlots) {
+      if (remainingDuration <= 0) break;
+      if (slots.length >= strategy.maxBlocks) break;
+
+      // Si on a déjà un créneau, s'assurer qu'on ne planifie pas trop loin dans le futur
+      if (lastSlotEnd && freeSlot.start.getTime() - lastSlotEnd.getTime() > 7 * 24 * 60 * 60 * 1000) {
+        // Plus de 7 jours entre les créneaux, arrêter
+        break;
+      }
+
+      const slotDuration = (freeSlot.end.getTime() - freeSlot.start.getTime()) / (1000 * 60); // en minutes
+      const blockSize = Math.min(slotDuration, remainingDuration, Math.max(strategy.minBlockSize, Math.floor(remainingDuration / (strategy.maxBlocks - slots.length))));
+
+      if (blockSize >= strategy.minBlockSize) {
+        const blockStart = freeSlot.start;
+        const blockEnd = new Date(blockStart.getTime() + blockSize * 60 * 1000);
+
+        slots.push({
+          start: blockStart,
+          end: blockEnd,
+          duration: blockSize,
+        });
+
+        remainingDuration -= blockSize;
+        lastSlotEnd = blockEnd;
+      }
+    }
+
+    if (remainingDuration <= 0 && slots.length > 0) {
+      console.log("[SCHEDULE TASK SPLIT] SUCCÈS: Tâche splittée en", slots.length, "blocs");
+      
+      // Créer les événements
+      const createdSlots = [];
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i];
+        const event = await createCalendarEvent(user, {
+          title: `${task.title}${i > 0 ? ` (${i + 1}/${slots.length})` : ""}`,
+          description: task.description || "",
+          start: slot.start,
+          end: slot.end,
+        });
+
+        createdSlots.push({
+          event,
+          slot: {
+            start: slot.start,
+            end: slot.end,
+          },
+        });
+      }
+
+      return {
+        success: true,
+        event: createdSlots[0].event, // Pour compatibilité
+        slot: createdSlots[0].slot, // Pour compatibilité
+        slots: createdSlots,
+        durationScheduled: totalDuration,
+        split: true,
+      };
+    }
+  }
+
+  // Si les stratégies classiques ont échoué, essayer le split par sous-tâches en dernier recours
+  const subtasksWithDuration = (task.subtasks || []).filter(st => st.duration && st.duration > 0);
+  if (subtasksWithDuration.length > 0) {
+    console.log("[SCHEDULE TASK SPLIT] Stratégies classiques échouées, tentative de split par sous-tâches:", subtasksWithDuration.length, "sous-tâches");
+    const result = await scheduleTaskSplitBySubtasks(user, task, subtasksWithDuration, freeSlots, preferredDate);
+    if (result.success) {
+      return result;
+    }
+    console.log("[SCHEDULE TASK SPLIT] Split par sous-tâches également échoué");
+  }
+
+  console.log("[SCHEDULE TASK SPLIT] ÉCHEC: Impossible de splitter la tâche");
+  return {
+    success: false,
+    reason: `Impossible de planifier cette tâche de ${totalDuration} minutes. Aucun créneau suffisant trouvé, même en la découpant en plusieurs blocs.`,
+  };
+};
+
+/**
+ * Planifie une tâche en utilisant les durées des sous-tâches pour créer des événements logiques
+ */
+const scheduleTaskSplitBySubtasks = async (user, task, subtasksWithDuration, freeSlots, preferredDate = null) => {
+  console.log("[SCHEDULE TASK SPLIT BY SUBTASKS] Planification basée sur", subtasksWithDuration.length, "sous-tâches");
+  
+  const slots = [];
+  let subtaskIndex = 0;
+  let lastSlotEnd = null;
+  const maxDaysBetweenSlots = 7; // Maximum 7 jours entre les créneaux
+
+  for (const freeSlot of freeSlots) {
+    if (subtaskIndex >= subtasksWithDuration.length) break;
+
+    // Si on a déjà un créneau, s'assurer qu'on ne planifie pas trop loin dans le futur
+    if (lastSlotEnd && freeSlot.start.getTime() - lastSlotEnd.getTime() > maxDaysBetweenSlots * 24 * 60 * 60 * 1000) {
+      break;
+    }
+
+    const slotDuration = (freeSlot.end.getTime() - freeSlot.start.getTime()) / (1000 * 60); // en minutes
+    
+    // Essayer de regrouper plusieurs sous-tâches dans ce créneau
+    const groupedSubtasks = [];
+    let totalGroupDuration = 0;
+    let currentSubtaskIndex = subtaskIndex;
+
+    while (currentSubtaskIndex < subtasksWithDuration.length) {
+      const subtask = subtasksWithDuration[currentSubtaskIndex];
+      const subtaskDuration = subtask.duration || 0;
+      
+      if (totalGroupDuration + subtaskDuration <= slotDuration) {
+        groupedSubtasks.push({
+          subtask,
+          index: currentSubtaskIndex,
+        });
+        totalGroupDuration += subtaskDuration;
+        currentSubtaskIndex++;
+      } else {
+        break;
+      }
+    }
+
+    // Si on a trouvé au moins une sous-tâche qui tient dans ce créneau
+    if (groupedSubtasks.length > 0 && totalGroupDuration > 0) {
+      // Arrondir l'heure de début au quart d'heure le plus proche
+      let blockStart = roundToQuarterHour(freeSlot.start);
+      const blockEnd = new Date(blockStart.getTime() + totalGroupDuration * 60 * 1000);
+
+      // Vérifier que le créneau ne dépasse pas le slot libre
+      if (blockEnd.getTime() > freeSlot.end.getTime()) {
+        // Ajuster pour tenir dans le slot
+        blockStart = new Date(freeSlot.end.getTime() - totalGroupDuration * 60 * 1000);
+        blockStart = roundToQuarterHour(blockStart);
+      }
+
+      // Créer un titre descriptif basé sur les sous-tâches
+      let eventTitle = task.title;
+      if (groupedSubtasks.length === 1) {
+        eventTitle = `${task.title} - ${groupedSubtasks[0].subtask.title}`;
+      } else {
+        const subtaskTitles = groupedSubtasks.map(g => g.subtask.title).join(", ");
+        eventTitle = `${task.title} (${subtaskTitles})`;
+      }
+
+      slots.push({
+        start: blockStart,
+        end: blockEnd,
+        duration: totalGroupDuration,
+        subtasks: groupedSubtasks.map(g => g.subtask),
+        eventTitle,
+      });
+
+      subtaskIndex = currentSubtaskIndex;
+      lastSlotEnd = blockEnd;
+    }
+  }
+
+  // Vérifier si toutes les sous-tâches ont été planifiées
+  if (subtaskIndex >= subtasksWithDuration.length && slots.length > 0) {
+    console.log("[SCHEDULE TASK SPLIT BY SUBTASKS] SUCCÈS: Toutes les sous-tâches planifiées en", slots.length, "événements");
+    
+    // Créer les événements dans Google Calendar
+    const createdSlots = [];
+    for (let i = 0; i < slots.length; i++) {
+      const slot = slots[i];
+      const event = await createCalendarEvent(user, {
+        title: slot.eventTitle + (slots.length > 1 ? ` (${i + 1}/${slots.length})` : ""),
+        description: task.description || "",
+        start: slot.start,
+        end: slot.end,
+      });
+
+      createdSlots.push({
+        event,
+        slot: {
+          start: slot.start,
+          end: slot.end,
+        },
+        subtasks: slot.subtasks,
+      });
+    }
+
+    return {
+      success: true,
+      event: createdSlots[0].event, // Pour compatibilité
+      slot: createdSlots[0].slot, // Pour compatibilité
+      slots: createdSlots,
+      durationScheduled: slots.reduce((sum, s) => sum + s.duration, 0),
+      split: true,
+      splitBySubtasks: true,
+    };
+  }
+
+  console.log("[SCHEDULE TASK SPLIT BY SUBTASKS] ÉCHEC: Impossible de planifier toutes les sous-tâches");
+  return {
+    success: false,
+    reason: "Impossible de planifier toutes les sous-tâches dans les créneaux disponibles.",
+  };
 };
 
 /**

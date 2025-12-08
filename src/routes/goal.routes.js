@@ -8,6 +8,7 @@ import {
   updateGoalStatus,
   addTaskToGoal,
   removeTaskFromGoal,
+  improveGoalWithAI,
 } from "../controllers/goal.controller.js";
 import { protect } from "../middlewares/auth.middleware.js";
 
@@ -15,6 +16,9 @@ const router = express.Router();
 
 // Toutes les routes nécessitent une authentification
 router.use(protect);
+
+// Route pour améliorer avec l'IA (doit être avant /:id)
+router.route("/improve").post(improveGoalWithAI);
 
 // Routes CRUD
 router.route("/").get(getGoals).post(createGoal);

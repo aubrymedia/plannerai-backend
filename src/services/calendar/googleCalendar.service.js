@@ -266,12 +266,12 @@ export const getFreeSlots = async (user, startDate, endDate, workingHours = {}) 
 };
 
 /**
- * Crée un événement dans le calendrier "Life Planner IA"
+ * Crée un événement dans le calendrier "Life Planner AI"
  */
 export const createCalendarEvent = async (user, eventData) => {
   try {
     if (!user.googleCalendarId) {
-      throw new Error("Calendrier Life Planner IA non configuré");
+      throw new Error("Calendrier Life Planner AI non configuré");
     }
 
     const oauth2Client = getUserOAuth2Client(user);
@@ -309,7 +309,7 @@ export const createCalendarEvent = async (user, eventData) => {
 export const deleteCalendarEvent = async (user, eventId) => {
   try {
     if (!user.googleCalendarId) {
-      throw new Error("Calendrier Life Planner IA non configuré");
+      throw new Error("Calendrier Life Planner AI non configuré");
     }
 
     const oauth2Client = getUserOAuth2Client(user);

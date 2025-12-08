@@ -75,7 +75,7 @@ export const handleCallback = asyncHandler(async (req, res) => {
         : null,
     });
 
-    // Créer le calendrier "Life Planner IA"
+    // Créer le calendrier "Life Planner AI"
     await createLifePlannerCalendar(user);
   }
 
@@ -87,7 +87,7 @@ export const handleCallback = asyncHandler(async (req, res) => {
 });
 
 /**
- * Crée le calendrier dédié "Life Planner IA" dans Google Calendar
+ * Crée le calendrier dédié "Life Planner AI" dans Google Calendar
  */
 const createLifePlannerCalendar = asyncHandler(async (user) => {
   // Créer un nouveau client OAuth pour cet utilisateur
@@ -108,7 +108,7 @@ const createLifePlannerCalendar = asyncHandler(async (user) => {
   try {
     const calendarList = await calendar.calendarList.list();
     const existingCalendar = calendarList.data.items.find(
-      (cal) => cal.summary === "Life Planner IA"
+      (cal) => cal.summary === "Life Planner AI"
     );
 
     if (existingCalendar) {
@@ -120,8 +120,8 @@ const createLifePlannerCalendar = asyncHandler(async (user) => {
     // Créer le nouveau calendrier
     const newCalendar = await calendar.calendars.insert({
       requestBody: {
-        summary: "Life Planner IA",
-        description: "Planning généré automatiquement par Life Planner IA",
+        summary: "Life Planner AI",
+        description: "Planning généré automatiquement par Life Planner AI",
         timeZone: "Europe/Paris",
       },
     });

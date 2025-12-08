@@ -1,5 +1,33 @@
 import Goal from "../models/goal.model.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { improveGoalDescription } from "../services/ai/openai.service.js";
+
+/**
+ * Améliorer une description d'objectif avec l'IA
+ */
+export const improveGoalWithAI = asyncHandler(async (req, res) => {
+  const { description } = req.body;
+
+  if (!description || !description.trim()) {
+    return res.status(400).json({
+      success: false,
+      error: "La description est requise",
+    });
+  }
+
+  try {
+    const improved = await improveGoalDescription(description);
+    res.json({
+      success: true,
+      data: improved,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message || "Erreur lors de l'amélioration avec l'IA",
+    });
+  }
+});
 
 /**
  * Récupérer tous les objectifs de l'utilisateur

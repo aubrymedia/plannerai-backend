@@ -2,6 +2,7 @@ import express from "express";
 import {
   getTasks,
   getTask,
+  getCurrentTask,
   createTask,
   updateTask,
   deleteTask,
@@ -13,6 +14,8 @@ import {
   updateTaskProgress,
   completeScheduledSlot,
   rescheduleRemaining,
+  rescheduleTask,
+  syncTaskSlots,
 } from "../controllers/task.controller.js";
 import { protect } from "../middlewares/auth.middleware.js";
 
@@ -20,6 +23,9 @@ const router = express.Router();
 
 // Toutes les routes nécessitent une authentification
 router.use(protect);
+
+// Route pour récupérer la tâche en cours (doit être avant /:id)
+router.route("/current").get(getCurrentTask);
 
 // Routes CRUD
 router.route("/").get(getTasks).post(createTask);
@@ -42,8 +48,13 @@ router.route("/:id/subtasks/:subtaskIndex").put(updateSubtask);
 // Route pour planifier une tâche dans Google Calendar
 router.route("/:id/schedule").post(scheduleTaskToCalendar);
 
+// Route pour synchroniser les créneaux avec Google Calendar
+router.route("/:id/sync-slots").post(syncTaskSlots);
+
+// Route pour replanifier complètement une tâche (supprime les anciens créneaux)
+router.route("/:id/reschedule").post(rescheduleTask);
 // Route pour replanifier la partie restante d'une tâche
-router.route("/:id/reschedule").post(rescheduleRemaining);
+router.route("/:id/reschedule-remaining").post(rescheduleRemaining);
 
 // Route pour mettre à jour la progression d'une tâche
 router.route("/:id/progress").put(updateTaskProgress);
