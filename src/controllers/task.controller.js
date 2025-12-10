@@ -3,7 +3,7 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { improveTaskDescription } from "../services/ai/openai.service.js";
 import { scheduleTask, rescheduleRemainingTask, calculateRemainingTime } from "../services/calendar/taskScheduler.service.js";
 import User from "../models/user.model.js";
-import { getCalendarEvents } from "../services/calendar/googleCalendar.service.js";
+import { getCalendarEvents, createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } from "../services/calendar/googleCalendar.service.js";
 
 /**
  * Récupérer toutes les tâches de l'utilisateur
@@ -1046,5 +1046,187 @@ export const rescheduleRemaining = asyncHandler(async (req, res) => {
       alternatives: result.alternatives || [],
       remainingTime: calculateRemainingTime(task),
     },
+  });
+});
+
+/**
+ * Met à jour un créneau planifié
+ */
+export const updateTaskSlot = asyncHandler(async (req, res) => {
+  const { id, slotIndex } = req.params;
+  const { start, end } = req.body;
+
+  if (!start || !end) {
+    return res.status(400).json({
+      success: false,
+      error: "Les dates de début et de fin sont requises",
+    });
+  }
+
+  const task = await Task.findOne({
+    _id: id,
+    userId: req.user._id,
+  });
+
+  if (!task) {
+    return res.status(404).json({
+      success: false,
+      error: "Tâche non trouvée",
+    });
+  }
+
+  if (!task.scheduledSlots || slotIndex >= task.scheduledSlots.length) {
+    return res.status(404).json({
+      success: false,
+      error: "Créneau non trouvé",
+    });
+  }
+
+  const slot = task.scheduledSlots[slotIndex];
+  const user = await User.findById(req.user._id);
+
+  // Mettre à jour l'événement dans Google Calendar si présent
+  if (slot.googleEventId) {
+    try {
+      await updateCalendarEvent(user, slot.googleEventId, {
+        title: task.title,
+        description: task.description || "",
+        start: new Date(start),
+        end: new Date(end),
+      });
+    } catch (error) {
+      console.error("[Update Slot] Error updating calendar event:", error);
+      // Continuer même si la mise à jour du calendrier échoue
+    }
+  }
+
+  // Mettre à jour le créneau dans la base de données
+  slot.start = new Date(start);
+  slot.end = new Date(end);
+  await task.save();
+
+  await task.populate("companyId", "name");
+
+  res.json({
+    success: true,
+    data: task,
+  });
+});
+
+/**
+ * Supprime un créneau planifié
+ */
+export const deleteTaskSlot = asyncHandler(async (req, res) => {
+  const { id, slotIndex } = req.params;
+
+  const task = await Task.findOne({
+    _id: id,
+    userId: req.user._id,
+  });
+
+  if (!task) {
+    return res.status(404).json({
+      success: false,
+      error: "Tâche non trouvée",
+    });
+  }
+
+  if (!task.scheduledSlots || slotIndex >= task.scheduledSlots.length) {
+    return res.status(404).json({
+      success: false,
+      error: "Créneau non trouvé",
+    });
+  }
+
+  const slot = task.scheduledSlots[slotIndex];
+  const user = await User.findById(req.user._id);
+
+  // Supprimer l'événement dans Google Calendar si présent
+  if (slot.googleEventId) {
+    try {
+      await deleteCalendarEvent(user, slot.googleEventId);
+    } catch (error) {
+      console.error("[Delete Slot] Error deleting calendar event:", error);
+      // Continuer même si la suppression du calendrier échoue
+    }
+  }
+
+  // Supprimer le créneau de la base de données
+  task.scheduledSlots.splice(slotIndex, 1);
+  await task.save();
+
+  await task.populate("companyId", "name");
+
+  res.json({
+    success: true,
+    data: task,
+  });
+});
+
+/**
+ * Ajoute un nouveau créneau planifié
+ */
+export const addTaskSlot = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { start, end } = req.body;
+
+  if (!start || !end) {
+    return res.status(400).json({
+      success: false,
+      error: "Les dates de début et de fin sont requises",
+    });
+  }
+
+  const task = await Task.findOne({
+    _id: id,
+    userId: req.user._id,
+  });
+
+  if (!task) {
+    return res.status(404).json({
+      success: false,
+      error: "Tâche non trouvée",
+    });
+  }
+
+  const user = await User.findById(req.user._id);
+
+  // Créer l'événement dans Google Calendar
+  let googleEventId = null;
+  try {
+    const event = await createCalendarEvent(user, {
+      title: task.title,
+      description: task.description || "",
+      start: new Date(start),
+      end: new Date(end),
+    });
+    googleEventId = event.id;
+  } catch (error) {
+    console.error("[Add Slot] Error creating calendar event:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Erreur lors de la création de l'événement dans Google Calendar",
+    });
+  }
+
+  // Ajouter le créneau à la base de données
+  if (!task.scheduledSlots) {
+    task.scheduledSlots = [];
+  }
+
+  task.scheduledSlots.push({
+    start: new Date(start),
+    end: new Date(end),
+    googleEventId,
+    completed: false,
+    timeSpent: 0,
+  });
+
+  await task.save();
+  await task.populate("companyId", "name");
+
+  res.json({
+    success: true,
+    data: task,
   });
 });

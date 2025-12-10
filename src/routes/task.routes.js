@@ -16,6 +16,9 @@ import {
   rescheduleRemaining,
   rescheduleTask,
   syncTaskSlots,
+  updateTaskSlot,
+  deleteTaskSlot,
+  addTaskSlot,
 } from "../controllers/task.controller.js";
 import { protect } from "../middlewares/auth.middleware.js";
 
@@ -62,6 +65,10 @@ router.route("/:id/progress/:slotIndex").put(updateTaskProgress);
 
 // Route pour marquer un créneau comme complété
 router.route("/:id/slots/:slotIndex/complete").put(completeScheduledSlot);
+
+// Routes pour gérer les créneaux individuellement
+router.route("/:id/slots/:slotIndex").put(updateTaskSlot).delete(deleteTaskSlot);
+router.route("/:id/slots").post(addTaskSlot);
 
 export default router;
 

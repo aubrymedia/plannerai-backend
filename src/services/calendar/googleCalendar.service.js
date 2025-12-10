@@ -2,6 +2,50 @@ import { google } from "googleapis";
 import User from "../../models/user.model.js";
 import env from "../../config/env.js";
 
+// Arrondit au quart d'heure supérieur
+const roundUpToQuarterHour = (date) => {
+  const d = new Date(date);
+  const minutes = d.getMinutes();
+  const remainder = minutes % 15;
+  if (remainder !== 0 || d.getSeconds() !== 0 || d.getMilliseconds() !== 0) {
+    d.setMinutes(minutes + (15 - remainder), 0, 0);
+  } else {
+    d.setSeconds(0, 0);
+  }
+  return d;
+};
+
+// Arrondit au quart d'heure inférieur
+const roundDownToQuarterHour = (date) => {
+  const d = new Date(date);
+  const minutes = d.getMinutes();
+  const remainder = minutes % 15;
+  d.setMinutes(minutes - remainder, 0, 0);
+  return d;
+};
+
+// Arrondit à la demi-heure inférieure (00 ou 30)
+const roundDownToHalfHour = (date) => {
+  const d = new Date(date);
+  const minutes = d.getMinutes();
+  const remainder = minutes % 30;
+  d.setMinutes(minutes - remainder, 0, 0);
+  return d;
+};
+
+// Arrondit à la demi-heure supérieure (00 ou 30)
+const roundUpToHalfHour = (date) => {
+  const d = new Date(date);
+  const minutes = d.getMinutes();
+  const remainder = minutes % 30;
+  if (remainder !== 0 || d.getSeconds() !== 0 || d.getMilliseconds() !== 0) {
+    d.setMinutes(minutes + (30 - remainder), 0, 0);
+  } else {
+    d.setSeconds(0, 0);
+  }
+  return d;
+};
+
 /**
  * Crée un client OAuth2 pour un utilisateur spécifique
  */
@@ -118,15 +162,20 @@ export const getCalendarEvents = async (user, startDate, endDate) => {
  */
 export const getFreeSlots = async (user, startDate, endDate, workingHours = {}) => {
   console.log("[GET FREE SLOTS] Début de la recherche de créneaux libres");
+
+  // Aligner les bornes sur des demi-heures pour que les slots tombent sur :00 / :30
+  const roundedStart = roundDownToHalfHour(startDate);
+  const roundedEnd = roundUpToHalfHour(endDate);
+
   console.log("[GET FREE SLOTS] Période:", {
-    start: startDate.toISOString(),
-    end: endDate.toISOString(),
-    duration: (endDate - startDate) / (1000 * 60 * 60 * 24), // en jours
+    start: roundedStart.toISOString(),
+    end: roundedEnd.toISOString(),
+    duration: (roundedEnd - roundedStart) / (1000 * 60 * 60 * 24), // en jours
   });
   
   try {
     console.log("[GET FREE SLOTS] Récupération des événements...");
-    const events = await getCalendarEvents(user, startDate, endDate);
+    const events = await getCalendarEvents(user, roundedStart, roundedEnd);
     
     console.log("[GET FREE SLOTS] Événements récupérés:", events.length);
     if (events.length > 0) {
@@ -165,7 +214,7 @@ export const getFreeSlots = async (user, startDate, endDate, workingHours = {}) 
 
     // Calculer les créneaux libres
     const freeSlots = [];
-    let currentTime = new Date(startDate);
+    let currentTime = new Date(roundedStart);
     
     console.log("[GET FREE SLOTS] Nombre d'événements occupés:", busySlots.length);
     if (busySlots.length > 0) {
@@ -175,7 +224,7 @@ export const getFreeSlots = async (user, startDate, endDate, workingHours = {}) 
       });
     }
 
-    while (currentTime < endDate) {
+    while (currentTime < roundedEnd) {
       const slotEnd = new Date(currentTime.getTime() + 30 * 60 * 1000); // Créneaux de 30 min
 
       // Vérifier si le créneau chevauche un événement
@@ -300,6 +349,44 @@ export const createCalendarEvent = async (user, eventData) => {
   } catch (error) {
     console.error("[Google Calendar] Error creating event:", error);
     throw new Error("Erreur lors de la création de l'événement");
+  }
+};
+
+/**
+ * Met à jour un événement du calendrier
+ */
+export const updateCalendarEvent = async (user, eventId, eventData) => {
+  try {
+    if (!user.googleCalendarId) {
+      throw new Error("Calendrier Life Planner AI non configuré");
+    }
+
+    const oauth2Client = getUserOAuth2Client(user);
+    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+
+    const event = {
+      summary: eventData.title,
+      description: eventData.description || "",
+      start: {
+        dateTime: eventData.start.toISOString(),
+        timeZone: "Europe/Paris",
+      },
+      end: {
+        dateTime: eventData.end.toISOString(),
+        timeZone: "Europe/Paris",
+      },
+    };
+
+    const response = await calendar.events.update({
+      calendarId: user.googleCalendarId,
+      eventId: eventId,
+      requestBody: event,
+    });
+
+    return response.data;
+  } catch (error) {
+    console.error("[Google Calendar] Error updating event:", error);
+    throw new Error("Erreur lors de la mise à jour de l'événement");
   }
 };
 
